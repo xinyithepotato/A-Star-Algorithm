@@ -3,23 +3,36 @@ import math
 import sys
 import heapq
 
+class State:
+    def __init__(self, pos, g_cost, gravity, speed, treasures, path, last_dir=None):
+        self.pos = pos
+        self.g_cost = g_cost
+        self.gravity = gravity
+        self.speed = speed
+        self.treasures = treasures  # set of remaining treasures
+        self.path = path
+        self.last_dir = last_dir
+
+    def __lt__(self, other):
+        return self.g_cost < other.g_cost
+
 # Initialize Pygame
 pygame.init()
 
 # Define constants
 GRID_ROWS = 6
 GRID_COLS = 10
-HEX_RADIUS = 40 # Using HEX_RADIUS directly for consistent sizing
+HEX_RADIUS = 40
 HEX_HEIGHT = HEX_RADIUS * math.sqrt(3)
 HEX_WIDTH = HEX_RADIUS * 2
 
 # Calculate pixel dimensions for the grid area (including offsets from hex_to_pixel)
-GRID_PIXEL_AREA_WIDTH = int(HEX_RADIUS * 3/2 * (GRID_COLS - 1) + HEX_RADIUS * 2 + 50) # Max X + radius + initial offset
-GRID_PIXEL_AREA_HEIGHT = int(HEX_RADIUS * math.sqrt(3) * (GRID_ROWS - 1 + 0.5) + HEX_RADIUS * 2 + 50) # Max Y + radius + initial offset
+GRID_PIXEL_AREA_WIDTH = int(HEX_RADIUS * 3/2 * (GRID_COLS - 1) + HEX_RADIUS * 2 + 50)
+GRID_PIXEL_AREA_HEIGHT = int(HEX_RADIUS * math.sqrt(3) * (GRID_ROWS - 1 + 0.5) + HEX_RADIUS * 2 + 50)
 
 INFO_PANEL_WIDTH = 350 # Width for the new information panel
 SCREEN_WIDTH = GRID_PIXEL_AREA_WIDTH + INFO_PANEL_WIDTH
-SCREEN_HEIGHT = max(GRID_PIXEL_AREA_HEIGHT, 600) # Ensure enough height for both grid and panel (min 600)
+SCREEN_HEIGHT = max(GRID_PIXEL_AREA_HEIGHT, 600)
 
 
 # Map symbols and colors
@@ -27,12 +40,12 @@ CELL_COLORS = {
     ' ': (255, 255, 255), #Empty space
     'O': (165, 165, 165), #Obstacle
     '$': (255, 213, 3), #Treasure
-    # Traps (Using single color for all traps as in original code)
+    # Traps
     '(~)': (234, 135, 237),
     '(+)': (234, 135, 237),
     '(x)': (234, 135, 237),
     '(/)': (234, 135, 237),
-    # Rewards (Using single color for all rewards as in original code)
+    # Rewards
     '[+]': (18, 196, 149),
     '[x]': (18, 196, 149)
 }
@@ -57,7 +70,7 @@ all_treasures = [(r, c) for r in range(GRID_ROWS) for c in range(GRID_COLS) if b
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Virtual Treasure Hunt")
 
-font = pygame.font.SysFont(None, 22) # Slightly smaller font for better fit, adjusted from 24
+font = pygame.font.SysFont(None, 22)
 
 # Global list to store messages for the GUI log
 game_log = []
@@ -81,22 +94,34 @@ ODD_COL_MOVES = [
     (-1, +1)    # Up right
 ]
 
+# Apply transformations on moves landing in Trap 3
+TRAP_3_MOVES = {
+    # Trap 3 is in even column, so only use moves from odd columns
+    (+1, 0): (+2, 0),
+    (-1, 0): (-2, 0),
+    (+1, +1): (+1, +2),
+    (+1, -1): (+1, -2),
+    (0, +1): (-1, +2),
+    (0, -1): (-1, -2)
+}
+
 def heuristic(a, b):
     # Heuristic function for A* search
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 def get_neighbors(pos):
     row, col = pos
-    # choose movement sets based on even or odd column
-    movements = EVEN_COL_MOVES if col % 2 == 0 else ODD_COL_MOVES
-    neighbors = []
+    # Select movement set based on column type
+    moves = EVEN_COL_MOVES if col % 2 == 0 else ODD_COL_MOVES
+    results = []
 
-    for dr, dc in movements:
+    for dr, dc in moves:
         nr, nc = row + dr, col + dc
-        # Compile the list of possible nodes to visit next
         if in_bounds((nr, nc)) and is_valid((nr, nc)):
-            neighbors.append((nr, nc))
-    return neighbors
+            # Return list of neighbors and the moves to reach them
+            results.append(((nr, nc), (dc, dr))) 
+
+    return results
 
 def in_bounds(pos):
     row, col = pos
@@ -108,57 +133,100 @@ def is_valid(pos):
     # Check if within bounds + no obstacles
     return in_bounds(pos) and board[row][col] != 'O'
 
-def a_star(start, goal):
+def a_star(start, goal, treasures):
     open_set = []
-    heapq.heappush(open_set, (0, start))
-    came_from = {}
-    g_score = {start: 0}
+    start_state = State(start, 0, 1.0, 1.0, treasures.copy(), [start], None)
+    heapq.heappush(open_set, (0, start_state))
+    visited = set()
 
     while open_set:
-        _, current = heapq.heappop(open_set)
+        _, state = heapq.heappop(open_set)
+        r, c = state.pos
 
-        if current == goal:
-            # Reconstruct path
-            path = []
-            while current in came_from:
-                path.append(current)
-                current = came_from[current]
-            path.append(start)
-            return path[::-1]
+        if state.pos == goal:
+            return state.path
 
-        # Neighbor exploration
-        for neighbor in get_neighbors(current):
-            tentative_g = g_score[current] + 1
-            # Update path if improvement found
-            if neighbor not in g_score or tentative_g < g_score[neighbor]:
-                g_score[neighbor] = tentative_g
-                f_score = tentative_g + heuristic(neighbor, goal)
-                heapq.heappush(open_set, (f_score, neighbor))
-                came_from[neighbor] = current
+        state_id = (state.pos, tuple(sorted(state.treasures)), round(state.gravity, 2), round(state.speed, 2))
+        if state_id in visited:
+            continue
+        visited.add(state_id)
+
+        for neighbor, direction in get_neighbors(state.pos):
+            nr, nc = neighbor
+            node = board[nr][nc]
+
+            # Avoid Trap 4 if treasures remain
+            if node == '(/)' and len(state.treasures) > 0:
+                continue
+
+            # Clone state attributes
+            gravity = state.gravity
+            speed = state.speed
+            treasures = state.treasures.copy()
+            last_dir = direction
+            new_path = state.path + [neighbor]
+            cost = state.g_cost + gravity / speed
+
+            # Trap & reward effects
+            if node == '(~)':  # Trap 1: double gravity
+                gravity *= 2
+
+            elif node == '(+)':  # Trap 2: half speed
+                speed /= 2
+
+            elif node == '(x)' and direction in TRAP_3_MOVES:  # Trap 3: forced teleport
+                nr, nc = TRAP_3_MOVES[direction]
+                
+                if not in_bounds((nr, nc)) or not is_valid((nr, nc)):
+                    continue  # skip invalid teleport
+                neighbor = (nr, nc)
+                new_path.append(neighbor)
+
+            elif node == '[+]':  # Reward 1: half gravity
+                    gravity /= 2
+
+            elif node == '[x]':  # Reward 2: double speed
+                    speed *= 2
+
+            elif node == '$' and neighbor in treasures:
+                treasures.remove(neighbor)
+
+            new_state = State(neighbor, cost, gravity, speed, treasures, new_path, last_dir)
+            priority = cost + heuristic(neighbor, goal)
+            heapq.heappush(open_set, (priority, new_state))
+
     return []
 
 # Calculate the shortest path to collect all treasures
 def all_treasures_path(start):
-    treasures = list(all_treasures)
+    treasures = set(all_treasures)
     path = []
     current = start
 
     while treasures:
-        # Find nearest treasure
-        treasures.sort(key=lambda t: heuristic(current, t))
-        nearest = treasures.pop(0)
-        partial_path = a_star(current, nearest)
+        # Find nearest treasure using modified A*
+        best_path = None
+        best_t = None
+        min_cost = float('inf')
 
-        if not partial_path:
-            game_log.append(f"No path found to treasure at {nearest}. Stopping.")
+        for t in treasures:
+            candidate_path = a_star(current, t, treasures)
+            if candidate_path and len(candidate_path) < min_cost:
+                best_path = candidate_path
+                best_t = t
+                min_cost = len(candidate_path)
+
+        if not best_path:
             break
 
-        # Remove the first node if it's a duplicate (already in path)
-        if path and partial_path and partial_path[0] == path[-1]:
-            path.extend(partial_path[1:])
+        if path and best_path[0] == path[-1]:
+            path.extend(best_path[1:])
         else:
-            path.extend(partial_path)
-        current = nearest
+            path.extend(best_path)
+
+        current = best_t
+        treasures.remove(best_t)
+
     return path
 
 # Draw the grid
@@ -204,7 +272,7 @@ def hex_corners(x, y, size):
         corners.append((cx, cy))
     return corners
 
-# --- NEW: Helper function to wrap text ---
+# Helper function to wrap text
 def wrap_text(text, font, max_width):
     words = text.split(' ')
     wrapped_lines = []
@@ -225,7 +293,6 @@ def wrap_text(text, font, max_width):
             current_line = [word]
             
             # If a single word is too long, add it as its own line (it will exceed)
-            # A more advanced solution would hyphenate or truncate long words.
             if font.size(word)[0] > max_width and not wrapped_lines and not current_line: # Edge case: very first word is too long
                 wrapped_lines.append(word)
                 current_line = [] # Reset for next words
@@ -245,10 +312,10 @@ def draw_info_panel(screen, log_messages, panel_x, panel_width, panel_height):
     # Draw a separator line
     pygame.draw.line(screen, (100, 100, 100), (panel_x, 0), (panel_x, panel_height), 2)
 
-    text_start_y = 10 # Starting Y position for text
-    line_height = font.get_linesize() + 2 # Get actual font line height + a small gap
+    text_start_y = 10
+    line_height = font.get_linesize() + 2
     
-    # Max text width inside the panel, considering 10px padding on each side
+    # Max text width inside the panel
     max_text_width = panel_width - 20 
 
     current_y = text_start_y
@@ -283,13 +350,15 @@ def main():
     game_log.append("Calculating path...") # Log initial status
     path = all_treasures_path(entry)
     game_log.append(f"Path calculated with {len(path)} cells traversed.")
-    # The full path string can be very long. Let's make it shorter for the GUI log if needed.
-    # For now, it's included, but if it overflows, you might want to truncate it.
     game_log.append(f"Full Path Length: {len(path)} steps.") 
     
     path_index = 0
-    animation_speed_ms = 100    # delay between steps (in milliseconds)
+    animation_speed_ms = 100 # delay between steps (in milliseconds)
     last_update_time = pygame.time.get_ticks()
+
+    # Keep track of gravity and speed for the log
+    current_gravity = 1.0
+    current_speed = 1.0
 
     while True:
         screen.fill((255, 255, 255)) # Fill entire screen with white background
@@ -298,7 +367,6 @@ def main():
 
         # Check if it's time for the next animation step and if there are steps left
         if current_time - last_update_time > animation_speed_ms and path_index < len(path):
-            # Only log if path_index is greater than 0 (i.e., not the starting position)
             if path_index > 0:
                 current_coords = path[path_index]
                 row, col = current_coords
@@ -306,11 +374,23 @@ def main():
                 
                 # Increment simple counters
                 total_simple_steps_taken += 1
-                total_simple_energy_used += 1 # Each simple step costs 1 energy unit
+                total_simple_energy_used += 1 * (current_gravity / current_speed)
 
                 # Log step details to game_log
                 game_log.append(f"Move {path_index}: To ({row}, {col}) '{cell_type}' | Steps: {total_simple_steps_taken} | Energy: {total_simple_energy_used}")
-            
+
+                if cell_type == '(~)':
+                    current_gravity *= 2
+
+                elif cell_type == '(+)':
+                    current_speed /= 2
+
+                elif cell_type == '[+]':
+                    current_gravity /= 2
+
+                elif cell_type == '[x]':
+                    current_speed *= 2
+
             path_index += 1
             last_update_time = current_time
         
@@ -332,8 +412,8 @@ def main():
                 pygame.quit()
                 sys.exit()
 
-        pygame.display.flip() # Update the full display surface
-        clock.tick(60) # Limit frame rate to 60 FPS
+        pygame.display.flip()
+        clock.tick(60)
 
 if __name__ == "__main__":
     main()
