@@ -4,7 +4,7 @@ import sys
 import heapq
 
 class State:
-    def __init__(self, pos, g_cost, gravity, speed, treasures, path, last_dir=None):
+    def __init__(self, pos, g_cost, gravity, speed, treasures, path, last_dir=None, traps_and_rewards=None):
         self.pos = pos
         self.g_cost = g_cost
         self.gravity = gravity
@@ -12,6 +12,7 @@ class State:
         self.treasures = treasures  # set of remaining treasures
         self.path = path
         self.last_dir = last_dir
+        self.traps_and_rewards = traps_and_rewards # set of unused traps/rewards
 
     def __lt__(self, other):
         return self.g_cost < other.g_cost
@@ -26,11 +27,11 @@ HEX_RADIUS = 40
 HEX_HEIGHT = HEX_RADIUS * math.sqrt(3)
 HEX_WIDTH = HEX_RADIUS * 2
 
-# Calculate pixel dimensions for the grid area (including offsets from hex_to_pixel)
+# Calculate pixel dimensions for the grid area
 GRID_PIXEL_AREA_WIDTH = int(HEX_RADIUS * 3/2 * (GRID_COLS - 1) + HEX_RADIUS * 2 + 50)
 GRID_PIXEL_AREA_HEIGHT = int(HEX_RADIUS * math.sqrt(3) * (GRID_ROWS - 1 + 0.5) + HEX_RADIUS * 2 + 50)
 
-INFO_PANEL_WIDTH = 350 # Width for the new information panel
+INFO_PANEL_WIDTH = 350
 SCREEN_WIDTH = GRID_PIXEL_AREA_WIDTH + INFO_PANEL_WIDTH
 SCREEN_HEIGHT = max(GRID_PIXEL_AREA_HEIGHT, 600)
 
@@ -63,8 +64,11 @@ board = [
 entry = (0, 0) # Player starting point
 player_pos = entry # Keep track of current player position
 
+traps_and_rewards = ['(~)', '(+)', '(x)', '(/)', '[+]', '[x]']
+
 # List of all treasure coordinates
 all_treasures = [(r, c) for r in range(GRID_ROWS) for c in range(GRID_COLS) if board[r][c] == '$']
+all_effects = [(r, c) for r in range(GRID_ROWS) for c in range(GRID_COLS) if board[r][c] in traps_and_rewards]
 
 # Initialize screen
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -97,12 +101,12 @@ ODD_COL_MOVES = [
 # Apply transformations on moves landing in Trap 3
 TRAP_3_MOVES = {
     # Trap 3 is in even column, so only use moves from odd columns
-    (+1, 0): (+2, 0),
-    (-1, 0): (-2, 0),
-    (+1, +1): (+1, +2),
-    (+1, -1): (+1, -2),
-    (0, +1): (-1, +2),
-    (0, -1): (-1, -2)
+    (+1, 0): (+2, -1),
+    (-1, 0): (-2, -1),
+    (+1, +1): (+2, +1),
+    (+1, -1): (-2, +1),
+    (0, +1): (0, +2),
+    (0, -1): (0, -2)
 }
 
 def heuristic(a, b):
@@ -135,7 +139,7 @@ def is_valid(pos):
 
 def a_star(start, goal, treasures):
     open_set = []
-    start_state = State(start, 0, 1.0, 1.0, treasures.copy(), [start], None)
+    start_state = State(start, 0, 1.0, 1.0, treasures.copy(), [start], None, all_effects.copy())
     heapq.heappush(open_set, (0, start_state))
     visited = set()
 
@@ -144,9 +148,9 @@ def a_star(start, goal, treasures):
         r, c = state.pos
 
         if state.pos == goal:
-            return state.path
+            return state.path, state.g_cost
 
-        state_id = (state.pos, tuple(sorted(state.treasures)), round(state.gravity, 2), round(state.speed, 2))
+        state_id = (state.pos, tuple(sorted(state.treasures)), round(state.gravity, 2), round(state.speed, 2), tuple(sorted(state.traps_and_rewards)))
         if state_id in visited:
             continue
         visited.add(state_id)
@@ -163,39 +167,48 @@ def a_star(start, goal, treasures):
             gravity = state.gravity
             speed = state.speed
             treasures = state.treasures.copy()
-            last_dir = direction
             new_path = state.path + [neighbor]
             cost = state.g_cost + gravity / speed
+            last_dir = direction
+            traps_and_rewards = state.traps_and_rewards.copy()
 
             # Trap & reward effects
-            if node == '(~)':  # Trap 1: double gravity
+            if node == '(~)' and neighbor in traps_and_rewards: # Trap 1: double gravity
                 gravity *= 2
+                traps_and_rewards.remove(neighbor)
 
-            elif node == '(+)':  # Trap 2: half speed
+            elif node == '(+)' and neighbor in traps_and_rewards: # Trap 2: half speed
                 speed /= 2
+                traps_and_rewards.remove(neighbor)
 
-            elif node == '(x)' and direction in TRAP_3_MOVES:  # Trap 3: forced teleport
-                nr, nc = TRAP_3_MOVES[direction]
+            elif node == '(x)' and last_dir in TRAP_3_MOVES:  # Trap 3: forced teleport
+                
+                new_move = TRAP_3_MOVES[last_dir]
+                nc += new_move[0]
+                nr += new_move[1]
                 
                 if not in_bounds((nr, nc)) or not is_valid((nr, nc)):
                     continue  # skip invalid teleport
                 neighbor = (nr, nc)
-                new_path.append(neighbor)
+                new_path.append((nr, nc))
 
-            elif node == '[+]':  # Reward 1: half gravity
-                    gravity /= 2
+            elif node == '[+]' and neighbor in traps_and_rewards: # Reward 1: half gravity
+                gravity /= 2
+                traps_and_rewards.remove(neighbor)
 
-            elif node == '[x]':  # Reward 2: double speed
-                    speed *= 2
+            elif node == '[x]' and neighbor in traps_and_rewards: # Reward 2: double speed
+                speed *= 2
+                traps_and_rewards.remove(neighbor)
 
             elif node == '$' and neighbor in treasures:
+                # remove collected treasures
                 treasures.remove(neighbor)
 
-            new_state = State(neighbor, cost, gravity, speed, treasures, new_path, last_dir)
+            new_state = State(neighbor, cost, gravity, speed, treasures, new_path, last_dir, traps_and_rewards)
             priority = cost + heuristic(neighbor, goal)
             heapq.heappush(open_set, (priority, new_state))
 
-    return []
+    return [], float('inf')
 
 # Calculate the shortest path to collect all treasures
 def all_treasures_path(start):
@@ -204,28 +217,28 @@ def all_treasures_path(start):
     current = start
 
     while treasures:
-        # Find nearest treasure using modified A*
-        best_path = None
-        best_t = None
-        min_cost = float('inf')
+        # Find the nearest treasure
+        best = None
+        best_energy = float('inf')
 
         for t in treasures:
-            candidate_path = a_star(current, t, treasures)
-            if candidate_path and len(candidate_path) < min_cost:
-                best_path = candidate_path
-                best_t = t
-                min_cost = len(candidate_path)
+            partial_path, energy = a_star(current, t, treasures)
+            if partial_path and energy < best_energy:
+                best = (partial_path, t)
+                best_energy = energy
 
-        if not best_path:
+        if not best:
             break
 
-        if path and best_path[0] == path[-1]:
-            path.extend(best_path[1:])
+        partial_path, t = best
+        # Remove the first node if it's a duplicate (already in path)
+        if path and partial_path[0] == path[-1]:
+            path.extend(partial_path[1:])
         else:
-            path.extend(best_path)
+            path.extend(partial_path)
 
-        current = best_t
-        treasures.remove(best_t)
+        current = t
+        treasures.remove(t)
 
     return path
 
@@ -292,7 +305,7 @@ def wrap_text(text, font, max_width):
             # Start a new line with the current word
             current_line = [word]
             
-            # If a single word is too long, add it as its own line (it will exceed)
+            # If a single word is too long, add it as its own line
             if font.size(word)[0] > max_width and not wrapped_lines and not current_line: # Edge case: very first word is too long
                 wrapped_lines.append(word)
                 current_line = [] # Reset for next words
@@ -335,15 +348,15 @@ def draw_info_panel(screen, log_messages, panel_x, panel_width, panel_height):
         all_display_lines = all_display_lines[-max_lines_to_display:]
 
     for line in all_display_lines:
-        text_surface = font.render(line, True, (0, 0, 0)) # Render message in black
-        screen.blit(text_surface, (panel_x + 10, current_y)) # 10px padding from left of panel
+        text_surface = font.render(line, True, (0, 0, 0))
+        screen.blit(text_surface, (panel_x + 10, current_y))
         current_y += line_height # Move to the next line for the next message/wrapped part
 
 # Main loop
 def main():
     clock = pygame.time.Clock()
     
-    # Initialize counters for steps and energy (still simple counts, not assignment rules yet)
+    # Initialize counters for steps and energy
     total_simple_steps_taken = 0
     total_simple_energy_used = 0 # Assuming 1 energy unit per simple step
 
@@ -353,7 +366,7 @@ def main():
     game_log.append(f"Full Path Length: {len(path)} steps.") 
     
     path_index = 0
-    animation_speed_ms = 100 # delay between steps (in milliseconds)
+    animation_speed_ms = 100 # delay between steps
     last_update_time = pygame.time.get_ticks()
 
     # Keep track of gravity and speed for the log
@@ -361,7 +374,7 @@ def main():
     current_speed = 1.0
 
     while True:
-        screen.fill((255, 255, 255)) # Fill entire screen with white background
+        screen.fill((255, 255, 255))
 
         current_time = pygame.time.get_ticks()
 
@@ -373,23 +386,32 @@ def main():
                 cell_type = board[row][col]
                 
                 # Increment simple counters
-                total_simple_steps_taken += 1
-                total_simple_energy_used += 1 * (current_gravity / current_speed)
+                total_simple_steps_taken += 1 / current_speed # Speed affects steps per move
+                total_simple_energy_used += 1 * (current_gravity / current_speed) # energy dependent on gravity and speed
 
                 # Log step details to game_log
                 game_log.append(f"Move {path_index}: To ({row}, {col}) '{cell_type}' | Steps: {total_simple_steps_taken} | Energy: {total_simple_energy_used}")
 
-                if cell_type == '(~)':
+                # Perform checks to keep log in sync with algorithm
+                if cell_type == '(~)' and board[row][col] in traps_and_rewards:
                     current_gravity *= 2
+                    traps_and_rewards.remove(board[row][col])
 
-                elif cell_type == '(+)':
+                elif cell_type == '(+)' and board[row][col] in traps_and_rewards:
                     current_speed /= 2
+                    traps_and_rewards.remove(board[row][col])
 
-                elif cell_type == '[+]':
+                elif cell_type == '(x)' and board[row][col] in traps_and_rewards:
+                    total_simple_steps_taken += 1
+                    total_simple_energy_used += 1
+
+                elif cell_type == '[+]' and board[row][col] in traps_and_rewards:
                     current_gravity /= 2
+                    traps_and_rewards.remove(board[row][col])
 
-                elif cell_type == '[x]':
+                elif cell_type == '[x]' and board[row][col] in traps_and_rewards:
                     current_speed *= 2
+                    traps_and_rewards.remove(board[row][col])
 
             path_index += 1
             last_update_time = current_time
